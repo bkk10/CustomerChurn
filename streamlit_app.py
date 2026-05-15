@@ -125,30 +125,50 @@ def load_or_train(path: str):
 
 
 def predict_single(model, input_df: pd.DataFrame):
-    # Reconstruct full feature row expected by the preprocessor
-    if hasattr(model, 'feature_columns'):
-        feature_cols = model.feature_columns
-    else:
-        # Fallback: use input columns as-is
-        feature_cols = list(input_df.columns)
+    # Try direct prediction first
+    try:
+        probs = model.predict_proba(input_df)[:, 1]
+        preds = (probs >= 0.5).astype(int)
+        return preds, probs
+    except Exception:
+        # Build full feature row from preprocessor's expected columns
+        feature_cols = None
+        try:
+            pre = model.named_steps.get('preprocessor', None)
+            if pre is not None and hasattr(pre, 'transformers_'):
+                cols = []
+                for name, trans, columns in pre.transformers_:
+                    if columns == 'drop' or columns == 'passthrough':
+                        continue
+                    # columns may be slice, list, or array-like
+                    try:
+                        cols.extend(list(columns))
+                    except Exception:
+                        # fallback if columns is a boolean or other type
+                        pass
+                feature_cols = cols
+        except Exception:
+            feature_cols = None
 
-    full = pd.DataFrame(columns=feature_cols)
-    for c in feature_cols:
-        if c in input_df.columns:
-            full[c] = input_df[c]
-        else:
-            # default numeric-ish features to 0, categorical to 'missing'
-            if c in ['tenure', 'MonthlyCharges', 'TotalCharges']:
-                full[c] = 0
+        if feature_cols is None or len(feature_cols) == 0:
+            feature_cols = getattr(model, 'feature_columns', list(input_df.columns))
+
+        full = pd.DataFrame({})
+        for c in feature_cols:
+            if c in input_df.columns:
+                full[c] = input_df[c].values
             else:
-                full[c] = 'missing'
+                if c in ['tenure', 'MonthlyCharges', 'TotalCharges']:
+                    full[c] = [0]
+                else:
+                    full[c] = ['missing']
 
-    # Ensure consistent dtypes
-    full = full.astype(object)
+        # Ensure single-row shape
+        full = full.astype(object)
 
-    probs = model.predict_proba(full)[:, 1]
-    preds = (probs >= 0.5).astype(int)
-    return preds, probs
+        probs = model.predict_proba(full)[:, 1]
+        preds = (probs >= 0.5).astype(int)
+        return preds, probs
 
 
 def retention_tip(row: pd.Series, prob: float) -> str:
