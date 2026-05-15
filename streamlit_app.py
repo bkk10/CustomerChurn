@@ -101,6 +101,11 @@ def build_and_train_model(df: pd.DataFrame):
 
     # Assemble final pipeline using fitted preprocessor and classifier
     clf = Pipeline(steps=[('preprocessor', preprocessor), ('classifier', clf_final)])
+    # Save the feature column order so we can recreate inputs at prediction time
+    try:
+        clf.feature_columns = list(X.columns)
+    except Exception:
+        clf.feature_columns = list(X.columns)
     joblib.dump(clf, MODEL_FILE)
     return clf
 
@@ -120,7 +125,28 @@ def load_or_train(path: str):
 
 
 def predict_single(model, input_df: pd.DataFrame):
-    probs = model.predict_proba(input_df)[:, 1]
+    # Reconstruct full feature row expected by the preprocessor
+    if hasattr(model, 'feature_columns'):
+        feature_cols = model.feature_columns
+    else:
+        # Fallback: use input columns as-is
+        feature_cols = list(input_df.columns)
+
+    full = pd.DataFrame(columns=feature_cols)
+    for c in feature_cols:
+        if c in input_df.columns:
+            full[c] = input_df[c]
+        else:
+            # default numeric-ish features to 0, categorical to 'missing'
+            if c in ['tenure', 'MonthlyCharges', 'TotalCharges']:
+                full[c] = 0
+            else:
+                full[c] = 'missing'
+
+    # Ensure consistent dtypes
+    full = full.astype(object)
+
+    probs = model.predict_proba(full)[:, 1]
     preds = (probs >= 0.5).astype(int)
     return preds, probs
 
