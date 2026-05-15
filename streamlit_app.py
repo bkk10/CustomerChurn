@@ -35,8 +35,25 @@ def build_and_train_model(df: pd.DataFrame):
     X = df.drop(columns=['customerID', 'Churn'], errors='ignore')
     y = df['Churn'].map({'Yes': 1, 'No': 0}) if 'Churn' in df.columns else None
 
-    numeric_feats = [c for c in X.columns if X[c].dtype in [np.float64, np.int64] or c in ['tenure', 'MonthlyCharges', 'TotalCharges']]
+    # Ensure target has no missing values
+    if y is not None:
+        mask = y.notnull()
+        X = X.loc[mask].copy()
+        y = y.loc[mask].copy()
+
+    # Explicit numeric features we care about
+    numeric_feats = [c for c in ['tenure', 'MonthlyCharges', 'TotalCharges'] if c in X.columns]
+    # Remaining features treated as categorical
     categorical_feats = [c for c in X.columns if c not in numeric_feats]
+
+    # Coerce numeric columns and impute missing values
+    for c in numeric_feats:
+        X[c] = pd.to_numeric(X[c], errors='coerce')
+        X[c].fillna(X[c].median(), inplace=True)
+
+    # Fill missing categorical values with a placeholder
+    if categorical_feats:
+        X[categorical_feats] = X[categorical_feats].fillna('missing')
 
     numeric_transformer = Pipeline(steps=[('scaler', StandardScaler())])
     categorical_transformer = Pipeline(steps=[('onehot', OneHotEncoder(handle_unknown='ignore'))])
