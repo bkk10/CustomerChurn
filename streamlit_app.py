@@ -186,6 +186,106 @@ def retention_tip(row: pd.Series, prob: float) -> str:
     return ' / '.join(tips) + f' (churn probability {prob*100:.0f}%)'
 
 
+def get_preprocessor_feature_names(preprocessor, X_columns):
+    feature_names = []
+    for name, transformer, cols in preprocessor.transformers_:
+        if cols == 'drop':
+            continue
+        if transformer == 'passthrough':
+            try:
+                feature_names.extend(list(cols))
+            except Exception:
+                pass
+            continue
+
+        # Numeric columns: keep names as-is
+        if hasattr(transformer, 'named_steps') and 'scaler' in transformer.named_steps:
+            try:
+                feature_names.extend(list(cols))
+            except Exception:
+                pass
+            continue
+
+        # Categorical: expand one-hot feature names
+        try:
+            # transformer may be a Pipeline with OneHotEncoder
+            ohe = None
+            if hasattr(transformer, 'named_steps'):
+                for step in transformer.named_steps.values():
+                    if hasattr(step, 'get_feature_names_out'):
+                        ohe = step
+                        break
+            elif hasattr(transformer, 'get_feature_names_out'):
+                ohe = transformer
+
+            if ohe is not None:
+                names = list(ohe.get_feature_names_out(cols))
+                feature_names.extend(names)
+            else:
+                try:
+                    feature_names.extend(list(cols))
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                feature_names.extend(list(cols))
+            except Exception:
+                pass
+
+    # Fallback if empty
+    if not feature_names:
+        feature_names = list(X_columns)
+    return feature_names
+
+
+def explain_prediction(model, X: pd.DataFrame, top_n: int = 3):
+    try:
+        pre = model.named_steps.get('preprocessor')
+        clf = model.named_steps.get('classifier')
+        if pre is None or clf is None:
+            return []
+
+        feature_names = get_preprocessor_feature_names(pre, X.columns)
+        Xt = pre.transform(X)
+        # convert to array
+        if hasattr(Xt, 'toarray'):
+            Xt_arr = Xt.toarray()
+        else:
+            Xt_arr = np.asarray(Xt)
+
+        coefs = np.asarray(clf.coef_).reshape(-1)
+        sample = Xt_arr[0]
+        contribs = coefs * sample
+        total = contribs.sum() + float(clf.intercept_[0])
+
+        abs_total = np.abs(contribs).sum()
+        if abs_total == 0:
+            abs_total = np.abs(total) if np.abs(total) > 0 else 1.0
+
+        items = []
+        for name, val in zip(feature_names, contribs):
+            items.append((name, float(val), abs(float(val)) / abs_total))
+
+        items.sort(key=lambda x: abs(x[1]), reverse=True)
+        top = items[:top_n]
+
+        explanations = []
+        for name, val, frac in top:
+            direction = 'increases' if val > 0 else 'decreases'
+            pct = frac * 100
+            # make name human-friendly
+            if '_' in name:
+                parts = name.split('_')
+                pretty = f"{parts[0]} = {'_'.join(parts[1:])}"
+            else:
+                pretty = name
+            explanations.append({'feature': pretty, 'direction': direction, 'contribution': val, 'pct': pct})
+
+        return explanations
+    except Exception:
+        return []
+
+
 def app_ui():
     st.set_page_config(page_title="Customer Churn Explorer", layout="wide")
     st.title("Customer Churn Explorer")
@@ -250,6 +350,14 @@ def app_ui():
             st.metric('Churn probability', f'{churn_prob*100:.1f}%')
             tip = retention_tip(input_df.iloc[0], churn_prob)
             st.info(tip)
+
+            # Explanation of prediction
+            expl = explain_prediction(model, input_df, top_n=3)
+            if expl:
+                st.subheader('Why the model predicted this')
+                for e in expl:
+                    sign = '+' if e['contribution'] > 0 else '-'
+                    st.write(f"- **{e['feature']}**: {e['direction']} churn ({sign}{abs(e['contribution']):.3f}, {e['pct']:.0f}% of signal)")
 
     st.subheader('Batch scoring')
     uploaded = st.file_uploader('Upload CSV to score', type=['csv'])
