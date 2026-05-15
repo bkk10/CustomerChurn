@@ -65,15 +65,44 @@ def build_and_train_model(df: pd.DataFrame):
         ]
     )
 
-    clf = Pipeline(steps=[('preprocessor', preprocessor), ('classifier', LogisticRegression(max_iter=1000))])
-
-    if y is not None:
-        clf.fit(X, y)
-        joblib.dump(clf, MODEL_FILE)
-        return clf
-    else:
+    if y is None:
         st.error("No target `Churn` column found to train model.")
         return None
+
+    # Fit preprocessor separately so we can inspect the transformed matrix
+    try:
+        preprocessor.fit(X)
+        Xt = preprocessor.transform(X)
+    except Exception as e:
+        st.error(f"Preprocessing failed: {e}")
+        return None
+
+    # Convert sparse to dense for validation
+    try:
+        if hasattr(Xt, 'toarray'):
+            Xt_arr = Xt.toarray()
+        else:
+            Xt_arr = np.asarray(Xt)
+    except Exception:
+        Xt_arr = np.asarray(Xt)
+
+    # Replace non-finite values with column medians (or zero if undefined)
+    if not np.isfinite(Xt_arr).all():
+        st.warning('Non-finite values detected in transformed features; imputing with 0s.')
+        Xt_arr[~np.isfinite(Xt_arr)] = 0.0
+
+    # Fit classifier on transformed array
+    try:
+        clf_final = LogisticRegression(max_iter=1000)
+        clf_final.fit(Xt_arr, y)
+    except Exception as e:
+        st.error(f"Classifier training failed: {e}")
+        return None
+
+    # Assemble final pipeline using fitted preprocessor and classifier
+    clf = Pipeline(steps=[('preprocessor', preprocessor), ('classifier', clf_final)])
+    joblib.dump(clf, MODEL_FILE)
+    return clf
 
 
 def load_or_train(path: str):
